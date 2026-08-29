@@ -1,0 +1,10 @@
+# Raw source data (too large / not redistributable)
+data/raw/*
+!data/raw/.gitkeep
+
+# R
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.html
