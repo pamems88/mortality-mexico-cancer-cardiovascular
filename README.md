@@ -50,16 +50,12 @@ to version.
 - Evaluation: 100 randomly sampled comments labeled independently by two
   annotators; metrics are accuracy, macro-F1 and Cohen's κ with bootstrap
   intervals. Only the comment text, not the model output, was shown to annotators.
-- Include in `nlp/`: the notebook (with the API key removed), the cleaned
-  comments CSV, the labeling sheet, and `evaluar_etiquetado.py`. Leave out the
-  model-output key file if you do not want to publish individual predictions.
 
 ## Requirements
 
 R (≥ 4.2) packages: `httr`, `jsonlite`, `dplyr`, `ggplot2`, `readr`, `duckdb`,
 `DBI`, `broom`, `forcats`, `tidyr`, `readxl`, plus the packages loaded at the top
-of `analisis_revision_LKE.R` (check its header; typically `sandwich`, `lmtest`,
-`nlme`).
+of `analisis_revision_LKE.R`
 
 Python (sentiment analysis): `pandas`, `numpy`, `openpyxl`, `pysentimiento`,
 `google-api-python-client`, `emoji`, `nltk`.
