@@ -1,0 +1,1159 @@
+---
+title: "Esperanza de Vida"
+author: "BUAP"
+date: "2026-07-02"
+output: html_document
+---
+
+```{r}
+# ETAPA 1 — Descarga de datos OMS (GHO OData API)
+# Indicador: NCDMORT3070
+# Probabilidad de morir entre los 30 y 70 años por cáncer, enfermedad cardiovascular, diabetes o enfermedad respiratoria
+
+
+# Fuente oficial: https://www.who.int/data/gho/info/gho-odata-api
+# Endpoint base:  https://ghoapi.azureedge.net/api/
+```
+
+```{r}
+#Paquetes a usar
+# install.packages(c("httr", "jsonlite", "dplyr", "ggplot2", "readr"))
+# install.packages("duckdb") #Este lo usamos para los archivos pesados de excel
+# install.packages("DBI")
+# install.packages("broom")
+# install.packages("forcats")
+
+```
+
+```{r}
+#ETAPA 1. OMS
+
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(ggplot2)
+library(readr)
+
+#1.1 Descarga el indicador completo
+#API regresa todos los países, todos los años, ambos sexos y el total.
+
+url <- "https://ghoapi.azureedge.net/api/NCDMORT3070"
+
+resp <- GET(url)
+stop_for_status(resp)  #lanza error si la petición falla
+
+raw_json <- content(resp, as = "text", encoding = "UTF-8")
+data_list <- fromJSON(raw_json, flatten = TRUE)
+
+df <- as_tibble(data_list$value)
+
+glimpse(df)  #revisa la estructura antes de continuar
+
+#1.2 Vemos los datos que nos interesan
+unique(df$SpatialDimType)
+
+#1.3 Se filtra méxico y se ven ambos sexos
+mexico_df <- df %>%
+  filter(SpatialDimType == "COUNTRY", 
+         SpatialDim == "MEX", #código del país
+         Dim1 == "SEX_BTSX") %>%
+  select(pais = SpatialDim,
+         anio = TimeDim, #año
+         sexo = Dim1, #sexo
+         probabilidad_30_70 = NumericValue) %>%
+  arrange(anio)
+
+print(mexico_df)
+
+#1.4 Comparación México y otros países
+paises_comparar <- c("MEX", "USA", "CAN", "CHL", "BRA", "ESP")
+
+comparativo_df <- df %>%
+  filter(SpatialDimType == "COUNTRY",
+         SpatialDim %in% paises_comparar,
+         Dim1 == "SEX_BTSX") %>%
+  select(pais = SpatialDim, anio = TimeDim, probabilidad_30_70 = NumericValue) %>%
+  arrange(pais, anio)
+
+#1.5 Guardamos estos datos
+dir.create("data", showWarnings = FALSE)
+write_csv(mexico_df, "data/oms_mexico_ncdmort3070.csv")
+write_csv(comparativo_df, "data/oms_comparativo_ncdmort3070.csv")
+
+#1.6 Gráfica rápida
+ggplot(mexico_df, aes(x = anio, y = probabilidad_30_70)) +
+  geom_line(color = "#B03A2E", linewidth = 1) +
+  geom_point(color = "#B03A2E") +
+  labs(
+    title = "México: probabilidad de morir entre 30 y 70 años",
+    subtitle = "Cáncer, enfermedad cardiovascular, diabetes o respiratoria crónica",
+    x = "Año", y = "Probabilidad (%)",
+    caption = "Fuente: OMS, Global Health Observatory (NCDMORT3070)"
+  ) +
+  theme_minimal(base_size = 13)
+
+# ggsave("data/mexico_ncdmort3070.png", width = 8, height = 5, dpi = 150)
+```
+
+```{r}
+#ETAPA 1. INEGI
+
+library(duckdb)
+library(DBI)
+library(dplyr)
+
+ruta_archivo <- "C:/Users/User/Documents/Pame Tarea/BUAP/Verano 2026/SS/Archivos/base_defunciones_inegi_1990_2024.csv"
+
+con <- dbConnect(duckdb::duckdb())
+
+#1.1 Nombre columnas encabezado
+encabezado <- dbGetQuery(con, sprintf(
+  "SELECT * FROM read_csv_auto('%s') LIMIT 5", ruta_archivo
+))
+print(encabezado)
+names(encabezado)
+
+#1.2 Cuenta cuántas filas tiene 
+n_filas <- dbGetQuery(con, sprintf(
+  "SELECT COUNT(*) AS total FROM read_csv_auto('%s')", ruta_archivo
+))
+print(n_filas)
+
+#1.3 Explora los campos de clasificación antes de filtrar 
+muestra_causas <- dbGetQuery(con, sprintf("
+  SELECT DISTINCT causa_def, capitulo, grupo, lista_mex, lista1, gr_lismex
+  FROM read_csv_auto('%s')
+  LIMIT 15
+", ruta_archivo))
+print(muestra_causas)
+ 
+#1,4. Compara anio_ocur vs anio_base vs anio_regis 
+muestra_anios <- dbGetQuery(con, sprintf("
+  SELECT anio_ocur, anio_base, anio_regis, COUNT(*) AS n
+  FROM read_csv_auto('%s')
+  GROUP BY anio_ocur, anio_base, anio_regis
+  ORDER BY anio_ocur
+  LIMIT 10
+", ruta_archivo))
+print(muestra_anios)
+
+#1.5 Conteo de defunciones por año: cáncer maligno y cardiovascular
+ 
+resumen_causas <- dbGetQuery(con, sprintf("
+  SELECT
+    anio_base AS anio,
+    CASE
+      WHEN capitulo = 2 AND causa_def LIKE 'C%%' THEN 'cancer'
+      WHEN capitulo = 9 THEN 'cardiovascular'
+      ELSE 'otra'
+    END AS grupo_causa,
+    COUNT(*) AS defunciones
+  FROM read_csv_auto('%s')
+  WHERE (capitulo = 2 AND causa_def LIKE 'C%%') OR capitulo = 9
+  GROUP BY anio, grupo_causa
+  ORDER BY anio, grupo_causa
+", ruta_archivo))
+ 
+print(resumen_causas)
+ 
+#1.6 Guarda el resultado ya resumido a las columnas que se necesitan
+dir.create("data", showWarnings = FALSE)
+write.csv(resumen_causas, "data/inegi_cancer_cardiovascular_anual.csv", row.names = FALSE)
+ 
+dbDisconnect(con, shutdown = TRUE)
+```
+
+```{r}
+#ETAPA 1. CONAPO Tasas poblacionales
+library(readxl)
+library(dplyr)
+
+ruta_pob <- "C:/Users/User/Documents/Pame Tarea/BUAP/Verano 2026/SS/Archivos/0_Pob_Mitad_1950_2070.xlsx" 
+pob <- read_excel(ruta_pob)
+
+
+#1.1 Se revisan categorías
+unique(pob$ENTIDAD)
+unique(pob$SEXO)  
+unique(pob$EDAD)
+range(pob$`AÑO`)
+
+#1.2  Muestra unas filas para ver el patrón
+pob %>% filter(AÑO == 2020) %>% head(20)
+
+#1.3. Población nacional total por año (suma edad y sexo)
+pob_nacional <- pob %>%
+  filter(ENTIDAD == "República Mexicana") %>%
+  group_by(anio = `AÑO`) %>%
+  summarise(poblacion_total = sum(POBLACION), .groups = "drop")
+ 
+#1.4. Une con el resumen de INEGI (cáncer/cardiovascular)
+inegi <- read_csv("data/inegi_cancer_cardiovascular_anual.csv")
+ 
+tasas <- inegi %>%
+  left_join(pob_nacional, by = "anio") %>%
+  mutate(tasa_100mil = round(defunciones / poblacion_total * 100000, 2))
+ 
+print(tasas, n=54)
+ 
+#1.5. Guarda el resultado final de la Etapa 1 
+write_csv(tasas, "data/tasas_inegi_cancer_cardiovascular.csv")
+ 
+#1.6 Gráfica rápida
+library(ggplot2)
+ggplot(tasas, aes(x = anio, y = tasa_100mil, color = grupo_causa)) +
+  geom_line(linewidth = 1) +
+  geom_point() +
+  labs(
+    title = "México: tasa de mortalidad por cáncer y cardiovascular",
+    subtitle = "Defunciones por cada 100,000 habitantes, 1998-2024",
+    x = "Año", y = "Tasa por 100,000 hab.", color = "Causa",
+    caption = "Fuente: INEGI (EDR, vía INSP) y CONAPO (Conciliación Demográfica)"
+  ) +
+  theme_minimal(base_size = 13)
+
+```
+
+```{r}
+#Etapa 2. Regresión Lineal (SIMPLE)
+# Nota: Pandemia 
+
+library("broom")
+
+tasas <- read_csv("data/tasas_inegi_cancer_cardiovascular.csv")
+
+#1. Variable de pandemia
+tasas <- tasas %>%
+  mutate(pandemia = if_else(anio %in% c(2020, 2021, 2022), 1, 0))
+ 
+#2. Modelo separado por cada causa
+datos_cancer <- tasas %>% filter(grupo_causa == "cancer")
+datos_cardio <- tasas %>% filter(grupo_causa == "cardiovascular")
+ 
+modelo_cancer <- lm(tasa_100mil ~ anio + pandemia, data = datos_cancer)
+modelo_cardio <- lm(tasa_100mil ~ anio + pandemia, data = datos_cardio)
+ 
+summary(modelo_cancer)
+summary(modelo_cardio)
+ 
+# Resumen ordenado en tabla (coeficientes, error estándar, p-valor)
+tidy(modelo_cancer)
+tidy(modelo_cardio)
+ 
+# Bondad de ajuste
+glance(modelo_cancer) %>% select(r.squared, adj.r.squared, p.value)
+glance(modelo_cardio) %>% select(r.squared, adj.r.squared, p.value)
+ 
+#3. Diagnóstico de residuos (checar que el modelo sea válido)
+par(mfrow = c(2, 2))
+plot(modelo_cancer, main = "Cáncer")
+plot(modelo_cardio, main = "Cardiovascular")
+par(mfrow = c(1, 1))
+ 
+#4. Proyección a 12 años (2025-2036), se asume no pandemia
+anios_futuro <- data.frame(anio = 2025:2036, pandemia = 0)
+ 
+pred_cancer <- predict(modelo_cancer, newdata = anios_futuro, interval = "confidence")
+pred_cardio <- predict(modelo_cardio, newdata = anios_futuro, interval = "confidence")
+ 
+proyeccion <- bind_rows(
+  data.frame(anio = anios_futuro$anio, grupo_causa = "cancer",
+             tasa_100mil = pred_cancer[, "fit"],
+             lo = pred_cancer[, "lwr"], hi = pred_cancer[, "upr"]),
+  data.frame(anio = anios_futuro$anio, grupo_causa = "cardiovascular",
+             tasa_100mil = pred_cardio[, "fit"],
+             lo = pred_cardio[, "lwr"], hi = pred_cardio[, "upr"])
+)
+ 
+print(proyeccion)
+ 
+#5. Gráfica: histórico + proyección con banda de confianza ------
+historico <- tasas %>% select(anio, grupo_causa, tasa_100mil) %>%
+  mutate(tipo = "Histórico")
+futuro <- proyeccion %>% mutate(tipo = "Proyección")
+ 
+ggplot() +
+  geom_line(data = historico, aes(anio, tasa_100mil, color = grupo_causa), linewidth = 1) +
+  geom_line(data = futuro, aes(anio, tasa_100mil, color = grupo_causa),
+            linetype = "dashed", linewidth = 1) +
+  geom_ribbon(data = futuro, aes(anio, ymin = lo, ymax = hi, fill = grupo_causa), alpha = 0.15) +
+  labs(
+    title = "México: tendencia y proyección de mortalidad 2025-2036",
+    subtitle = "Línea sólida = histórico | línea punteada = proyección (banda = intervalo de confianza 95%)",
+    x = "Año", y = "Tasa por 100,000 hab.", color = "Causa", fill = "Causa",
+    caption = "Modelo: regresión lineal con año + variable dummy de pandemia (2020-2022)"
+  ) +
+  theme_minimal(base_size = 13)
+
+#2.2
+#cáncer
+png("data/diagnostico_residuales_cancer.png", width = 1000, height = 700, res = 120)
+par(mfrow = c(2, 2))
+plot(modelo_cancer, main = "Cáncer")
+dev.off()
+
+#cardiovascular
+png("data/diagnostico_residuales_cardio.png", width = 1000, height = 700, res = 120)
+par(mfrow = c(2, 2))
+plot(modelo_cardio, main = "Cardiovascular")
+dev.off()
+ 
+```
+
+
+```{r}
+#Etapa 3. Acercamiento a datos (ya hecho)
+
+#Etapa 4. Categorización de datos por década y enfermedad
+
+tasas <- read_csv("data/tasas_inegi_cancer_cardiovascular.csv")
+ 
+#4.1 Asigna década
+# NOTA: para el reporte: 1998-1999 y 2020-2024 son periodos incompletos (no décadas completas de 10 años)
+
+tasas <- tasas %>%
+  mutate(decada = case_when(
+    anio < 2000 ~ "1990s (parcial: 1998-1999)",
+    anio < 2010 ~ "2000s",
+    anio < 2020 ~ "2010s",
+    TRUE        ~ "2020s (parcial: 2020-2024)"
+  ))
+ 
+#4.2 Resumen década y enfermedad
+resumen_decadas <- tasas %>%
+  group_by(decada, grupo_causa) %>%
+  summarise(
+    n_anios       = n(),
+    tasa_promedio = round(mean(tasa_100mil), 1),
+    tasa_minima   = round(min(tasa_100mil), 1),
+    tasa_maxima   = round(max(tasa_100mil), 1),
+    .groups = "drop"
+  ) %>%
+  arrange(grupo_causa, decada)
+ 
+print(resumen_decadas)
+write_csv(resumen_decadas, "data/resumen_por_decada.csv")
+ 
+#4.3 Variación porcentual entre décadas (crecimiento) 
+# Compara el promedio de cada década contra la década anterior para cuantificar qué tan rápido empeoró/mejoró cada enfermedad.
+variacion_decadas <- resumen_decadas %>%
+  arrange(grupo_causa, decada) %>%
+  group_by(grupo_causa) %>%
+  mutate(cambio_pct = round((tasa_promedio / lag(tasa_promedio) - 1) * 100, 1)) %>%
+  ungroup()
+ 
+print(variacion_decadas)
+ 
+#4.4 Gráfica: panel por década, comparación
+ggplot(tasas, aes(x = anio, y = tasa_100mil, color = grupo_causa)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.5) +
+  facet_wrap(~ decada, scales = "free_x") +
+  labs(
+    title = "Tasa de mortalidad por cáncer y cardiovascular, por década",
+    subtitle = "México, tasa por 100,000 habitantes",
+    x = "Año", y = "Tasa por 100,000 hab.", color = "Enfermedad",
+    caption = "Fuente: INEGI (defunciones) y CONAPO (población)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+ 
+#4.5 Gráfica de barras: promedio por década
+ggplot(resumen_decadas, aes(x = decada, y = tasa_promedio, fill = grupo_causa)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = tasa_promedio), position = position_dodge(width = 0.9),
+             vjust = -0.4, size = 3.5) +
+  labs(
+    title = "Tasa promedio de mortalidad por década",
+    subtitle = "Cáncer vs. cardiovascular, México",
+    x = NULL, y = "Tasa promedio por 100,000 hab.", fill = "Enfermedad",
+    caption = "Nota: 1990s y 2020s son periodos incompletos (2 y 5 años respectivamente)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom")
+```
+```{r}
+#4.6 Validación cruzada: tasas calculadas (INEGI/CONAPO) vs prob. morir 30-70 (OMS)
+
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(tidyr)
+
+oms <- read_csv("data/oms_mexico_ncdmort3070.csv")
+tasas <- read_csv("data/tasas_inegi_cancer_cardiovascular.csv")
+
+#Tasa combinada (cáncer + cardiovascular) por año 
+tasa_combinada <- tasas %>%
+  group_by(anio) %>%
+  summarise(tasa_combinada = sum(tasa_100mil), .groups = "drop")
+
+#Une ambas series en el rango común (2000-2021)
+comparacion <- oms %>%
+  select(anio, probabilidad_oms = probabilidad_30_70) %>%
+  inner_join(tasa_combinada, by = "anio") %>%
+  filter(anio >= 2000, anio <= 2021)
+
+#Indexa ambas series a 2000 = 100 
+base_oms   <- comparacion$probabilidad_oms[comparacion$anio == 2000]
+base_tasa  <- comparacion$tasa_combinada[comparacion$anio == 2000]
+
+comparacion <- comparacion %>%
+  mutate(
+    indice_oms  = probabilidad_oms / base_oms * 100,
+    indice_tasa = tasa_combinada / base_tasa * 100
+  )
+
+print(comparacion, n=23)
+
+#Gráfica de comparación indexada
+comparacion_larga <- comparacion %>%
+  select(anio, indice_oms, indice_tasa) %>%
+  pivot_longer(-anio, names_to = "serie", values_to = "indice") %>%
+  mutate(serie = recode(serie,
+    indice_oms  = "OMS: probabilidad de morir 30-70 años",
+    indice_tasa = "INEGI/CONAPO: tasa combinada cáncer + cardiovascular"
+  ))
+
+ggplot(comparacion_larga, aes(x = anio, y = indice, color = serie)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 2) +
+  geom_hline(yintercept = 100, linetype = "dotted", color = "gray50") +
+  labs(
+    title = "Validación cruzada: tendencia OMS vs. tendencia calculada (INEGI/CONAPO)",
+    subtitle = "Ambas series indexadas a 2000 = 100 (misma unidad de comparación: variación relativa)",
+    x = "Año", y = "Índice (2000 = 100)", color = NULL,
+    caption = "Si ambas líneas se mueven de forma parecida, se valida que el cálculo propio de tasas\nes consistente con la fuente internacional independiente (OMS)."
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom", legend.text = element_text(size = 9))
+
+ggsave("data/grafica_validacion_oms.png", width = 8.5, height = 5.5, dpi = 200)
+```
+
+```{r}
+#Sección 5. (A)
+# Modelos separados: pre-pandemia vs. pandemia/post-pandemia
+
+tasas <- read_csv("data/tasas_inegi_cancer_cardiovascular.csv")
+
+#5.1 Definir los dos periodos
+# Pre-pandemia: 1998-2019 (22 años, robusto para regresión)
+# Pandemia/post-pandemia: 2020-2024 (solo 5 años) #NOTA REPORTE
+tasas <- tasas %>%
+  mutate(periodo = if_else(anio < 2020, "pre_pandemia", "pandemia_post"))
+
+#5.2 Separa año y enfermedad
+datos <- list(
+  cancer_pre    = tasas %>% filter(grupo_causa == "cancer", periodo == "pre_pandemia"),
+  cancer_post   = tasas %>% filter(grupo_causa == "cancer", periodo == "pandemia_post"),
+  cardio_pre    = tasas %>% filter(grupo_causa == "cardiovascular", periodo == "pre_pandemia"),
+  cardio_post   = tasas %>% filter(grupo_causa == "cardiovascular", periodo == "pandemia_post")
+)
+
+#5.3 Ajustar los 4 modelos
+modelos <- lapply(datos, function(d) lm(tasa_100mil ~ anio, data = d))
+lapply(modelos, summary)
+
+#5.4 Tabla comparativa de pendientes 
+comparacion <- bind_rows(lapply(names(modelos), function(nombre) {
+  m <- modelos[[nombre]]
+  tidy(m) %>%
+    filter(term == "anio") %>%
+    mutate(modelo = nombre,
+           r2 = summary(m)$r.squared,
+           n_anios = nrow(m$model))
+})) %>%
+  select(modelo, n_anios, pendiente_anual = estimate, error_std = std.error,
+         p_valor = p.value, r2)
+
+print(comparacion)
+write_csv(comparacion, "data/comparacion_pendientes_periodos.csv")
+
+#5.5 Gráfica: dos líneas de tendencia por enfermedad, con el quiebre de 2020 marcado 
+ggplot(tasas, aes(x = anio, y = tasa_100mil, color = grupo_causa)) +
+  geom_point(size = 1.8) +
+  geom_smooth(data = tasas %>% filter(periodo == "pre_pandemia"),
+              method = "lm", se = TRUE, linewidth = 1) +
+  geom_smooth(data = tasas %>% filter(periodo == "pandemia_post"),
+              method = "lm", se = TRUE, linewidth = 1, linetype = "dashed") +
+  geom_vline(xintercept = 2019.5, linetype = "dotted", color = "gray40") +
+  annotate("text", x = 2019.5, y = max(tasas$tasa_100mil), label = "Pandemia",
+           angle = 90, vjust = -0.5, size = 3, color = "gray40") +
+  facet_wrap(~ grupo_causa, scales = "free_y") +
+  labs(
+    title = "Tendencia de mortalidad: modelos separados pre y post-pandemia",
+    subtitle = "Línea sólida = tendencia 1998-2019 | línea punteada = tendencia 2020-2024",
+    x = "Año", y = "Tasa por 100,000 hab.", color = "Enfermedad",
+    caption = "Sombra = intervalo de confianza 95% de cada modelo"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none")
+```
+```{r}
+# Sección 5. (B)
+# Preparación regresión logística (dado que alguien murió por cáncer o cardiovascular, qué factores pedicen cuál de las dos causas fue)
+
+ruta_archivo <- "C:/Users/User/Documents/Pame Tarea/BUAP/Verano 2026/SS/Archivos/base_defunciones_inegi_1990_2024.csv"
+
+con <- dbConnect(duckdb::duckdb())
+
+#5.1 Revisa las categorías de edad_agru y ent_resid
+muestra_edad <- dbGetQuery(con, sprintf("
+  SELECT DISTINCT edad_agru
+  FROM read_csv_auto('%s')
+  ORDER BY edad_agru
+", ruta_archivo))
+print(muestra_edad)
+
+muestra_entidad <- dbGetQuery(con, sprintf("
+  SELECT DISTINCT ent_resid
+  FROM read_csv_auto('%s')
+  ORDER BY ent_resid
+  LIMIT 40
+", ruta_archivo))
+print(muestra_entidad)
+
+# También revisa si sexo viene como código numérico o texto
+muestra_sexo <- dbGetQuery(con, sprintf("
+  SELECT DISTINCT sexo, COUNT(*) AS n
+  FROM read_csv_auto('%s')
+  GROUP BY sexo
+", ruta_archivo))
+print(muestra_sexo)
+```
+```{r}
+# Sección 5. (C) 
+# Regresión logística agrupada (dado que una persona murió por alguna de las dos enfermedades, la probabilidad de que sea cardiovacular cambia según periodo, sexo y grupo)
+
+library (tidyr)
+library(dplyr)
+library(ggplot2)
+library(forcats)
+
+ruta_archivo <- "C:/Users/User/Documents/Pame Tarea/BUAP/Verano 2026/SS/Archivos/base_defunciones_inegi_1990_2024.csv"
+
+con <- dbConnect(duckdb::duckdb())
+
+#5.1 Agregación por año, sexo, edad y causa
+agregado <- dbGetQuery(con, sprintf("
+  SELECT
+    anio_base AS anio,
+    sexo,
+    edad_agru,
+    CASE
+      WHEN capitulo = 2 AND causa_def LIKE 'C%%' THEN 'cancer'
+      WHEN capitulo = 9 THEN 'cardiovascular'
+    END AS grupo_causa,
+    COUNT(*) AS defunciones
+  FROM read_csv_auto('%s')
+  WHERE ((capitulo = 2 AND causa_def LIKE 'C%%') OR capitulo = 9)
+    AND sexo IN (1, 2)
+  GROUP BY anio, sexo, edad_agru, grupo_causa
+", ruta_archivo))
+
+dbDisconnect(con, shutdown = TRUE)
+
+glimpse(agregado)
+write_csv(agregado, "data/agregado_logistica_base.csv")
+
+#5.2 (b). Diccionario de edad_agru y agrupación en categorías amplias 
+dic_edad <- tibble::tribble(
+  ~edad_agru, ~etiqueta,                  ~grupo_edad,
+  "01", "Menor de 1 año",           "0-17",
+  "02", "1 año",                    "0-17",
+  "03", "2 años",                   "0-17",
+  "04", "3 años",                   "0-17",
+  "05", "4 años",                   "0-17",
+  "06", "5-9 años",                 "0-17",
+  "07", "10-14 años",               "0-17",
+  "08", "15-19 años",               "0-17",
+  "09", "20-24 años",               "18-39",
+  "10", "25-29 años",               "18-39",
+  "11", "30-34 años",               "18-39",
+  "12", "35-39 años",               "18-39",
+  "13", "40-44 años",               "40-59",
+  "14", "45-49 años",               "40-59",
+  "15", "50-54 años",               "40-59",
+  "16", "55-59 años",               "40-59",
+  "17", "60-64 años",               "60-79",
+  "18", "65-69 años",               "60-79",
+  "19", "70-74 años",               "60-79",
+  "20", "75-79 años",               "60-79",
+  "21", "80-84 años",               "80+",
+  "22", "85-89 años",               "80+",
+  "23", "90-94 años",               "80+",
+  "24", "95-99 años",               "80+",
+  "25", "100-104 años",             "80+",
+  "26", "105-109 años",             "80+",
+  "27", "110-114 años",             "80+",
+  "28", "115-119 años",             "80+",
+  "29", "120+ años",                "80+",
+  "30", "No especificada",          NA_character_
+)
+
+#5.2 (c) Unir al dataset y excluir "no especificada" 
+datos_wide <- agregado %>%
+  mutate(edad_agru = sprintf("%02d", as.integer(edad_agru))) %>%
+  left_join(dic_edad, by = "edad_agru") %>%
+  filter(!is.na(grupo_edad)) %>%   #quita "no especificada"
+  group_by(anio, sexo, grupo_edad, grupo_causa) %>%
+  summarise(defunciones = sum(defunciones), .groups = "drop") %>%
+  pivot_wider(names_from = grupo_causa, values_from = defunciones, values_fill = 0) %>%
+  mutate(
+    periodo = if_else(anio < 2020, "pre_pandemia", "pandemia_post"),
+    periodo = factor(periodo, levels = c("pre_pandemia", "pandemia_post")),
+    sexo    = factor(sexo, labels = c("sexo_1", "sexo_2")),  # ajustar cuando confirmes cuál es cuál
+    grupo_edad = factor(grupo_edad, levels = c("0-17", "18-39", "40-59", "60-79", "80+"))
+  )
+
+glimpse(datos_wide)
+write_csv(datos_wide, "data/datos_logistica_wide.csv")
+
+#5.3 Modelo de regresión logística agrupada 
+# Variable de resultado: proporción de muertes cardiovasculares (vs cáncer) dentro de cada combinación año/sexo/edad.
+modelo_logistico <- glm(
+  cbind(cardiovascular, cancer) ~ periodo + sexo + grupo_edad,
+  data = datos_wide,
+  family = binomial(link = "logit")
+)
+
+summary(modelo_logistico)
+
+#5.4 Modelo logístico y dispersión
+modelo_logistico_qb <- glm(
+  cbind(cardiovascular, cancer) ~ periodo + sexo + grupo_edad,
+  data = datos_wide,
+  family = quasibinomial(link = "logit")
+)
+ 
+summary(modelo_logistico_qb)
+ 
+resultados_or_qb <- tidy(modelo_logistico_qb, exponentiate = TRUE, conf.int = TRUE) %>%
+  select(term, odds_ratio = estimate, conf.low, conf.high, p.value)
+ 
+print(resultados_or_qb, n = 40)
+write_csv(resultados_or_qb, "data/resultados_odds_ratios_quasibinomial.csv")
+ 
+  #Tabla de resultados en odds ratios
+resultados_or <- tidy(modelo_logistico, exponentiate = TRUE, conf.int = TRUE) %>%
+  select(term, odds_ratio = estimate, conf.low, conf.high, p.value)
+ 
+print(resultados_or, n = 40)
+write_csv(resultados_or, "data/resultados_odds_ratios.csv")
+
+
+#5.5 Plot de odds ratios obtenidos 
+resultados_or_qb <- read_csv("data/resultados_odds_ratios_quasibinomial.csv")
+
+#Etiquetas
+forest_data <- resultados_or_qb %>%
+  filter(term != "(Intercept)") %>%
+  mutate(etiqueta = case_when(
+    term == "periodopandemia_post" ~ "Periodo: pandemia/post\n(vs. pre-pandemia)",
+    term == "sexosexo_2"           ~ "Sexo: mujer\n(vs. hombre)",
+    term == "grupo_edad18-39"      ~ "Edad 18-39\n(vs. 0-17)",
+    term == "grupo_edad40-59"      ~ "Edad 40-59\n(vs. 0-17)",
+    term == "grupo_edad60-79"      ~ "Edad 60-79\n(vs. 0-17)",
+    term == "grupo_edad80+"        ~ "Edad 80+\n(vs. 0-17)",
+    TRUE ~ term
+  )) %>%
+  #escalonamiento de mayor a menor
+  mutate(etiqueta = fct_reorder(etiqueta, odds_ratio))
+
+#gráfica
+ggplot(forest_data, aes(x = odds_ratio, y = etiqueta)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red", alpha = 0.7) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.15, color = "gray40") +
+  geom_point(size = 3.5, color = "#1A5276") +
+  scale_x_log10(breaks = c(0.5, 1, 2, 3, 5, 10, 13)) +
+  labs(
+    title = "Regresión logística (quasibinomial): factores asociados",
+    subtitle = "a morir por causa cardiovascular vs. cáncer",
+    x = "Odds ratio (IC 95%, escala logarítmica)",
+    y = NULL,
+    caption = "Fuente: modelo de regresión logística sobre datos agregados INEGI 1998-2024"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave("data/grafica4_odds_ratios_R.png", width = 8.5, height = 5.5, dpi = 200)
+
+```
+
+```{r}
+# Sección 7. Proyección a 2030 para comparación estructurada
+
+library(dplyr)
+
+#7.1 Proyección puntual a 2030 (pandemia = 0, ya no es periodo pandémico)
+nuevo_dato <- data.frame(anio = 2030, pandemia = 0)
+
+pred_cancer_2030 <- predict(modelo_cancer, newdata = nuevo_dato, interval = "confidence", level = 0.95)
+pred_cardio_2030 <- predict(modelo_cardio, newdata = nuevo_dato, interval = "confidence", level = 0.95)
+
+cat("=== Proyección a 2030 ===\n")
+cat(sprintf("Cáncer: %.1f por 100,000 hab. (IC 95%%: %.1f - %.1f)\n",
+            pred_cancer_2030[,"fit"], pred_cancer_2030[,"lwr"], pred_cancer_2030[,"upr"]))
+cat(sprintf("Cardiovascular: %.1f por 100,000 hab. (IC 95%%: %.1f - %.1f)\n",
+            pred_cardio_2030[,"fit"], pred_cardio_2030[,"lwr"], pred_cardio_2030[,"upr"]))
+
+#7.2 Convertir a "probabilidad aproximada" por facilidad de análisis
+cat(sprintf("\nEquivalente aproximado: %.2f%% de la población (cáncer)\n",
+            pred_cancer_2030[,"fit"] / 1000))
+cat(sprintf("Equivalente aproximado: %.2f%% de la población (cardiovascular)\n",
+            pred_cardio_2030[,"fit"] / 1000))
+
+```
+```{r}
+#install.packages("lmtest")
+#install.packages("sandwich")
+```
+
+
+```{r}
+# Análisis Revisión LKE
+
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(readr); library(ggplot2)
+  library(broom); library(lmtest); library(sandwich); library(nlme)
+  library(readxl); library(duckdb); library(DBI)
+})
+
+# RUTAS
+ruta_csv <- "C:/Users/User/Documents/Pame Tarea/BUAP/Verano 2026/SS/Archivos/base_defunciones_inegi_1990_2024.csv"
+ruta_pob <- "C:/Users/User/Documents/Pame Tarea/BUAP/Verano 2026/SS/Archivos/0_Pob_Mitad_1950_2070.xlsx"
+dir.create("data/revision", showWarnings = FALSE, recursive = TRUE)
+
+# 1. Definiciones CIE-10, Año de asignación y completitud de 2024.
+#(Revisor 1, corrección 1)
+con <- dbConnect(duckdb::duckdb())
+
+grupo_sql <- "CASE WHEN capitulo = 2 AND causa_def LIKE 'C%%' THEN 'cancer'
+                   WHEN capitulo = 9 THEN 'cardiovascular' END"
+filtro_sql <- "((capitulo = 2 AND causa_def LIKE 'C%%') OR capitulo = 9)"
+
+# 1.1 Rango de códigos CIE-10 realmente incluidos en cada grupo
+cie <- dbGetQuery(con, sprintf("
+  SELECT %s AS grupo_causa,
+         MIN(causa_def) AS codigo_min, MAX(causa_def) AS codigo_max,
+         COUNT(DISTINCT causa_def) AS n_codigos_4car,
+         COUNT(DISTINCT SUBSTR(causa_def,1,3)) AS n_codigos_3car
+  FROM read_csv_auto('%s') WHERE %s GROUP BY 1", grupo_sql, ruta_csv, filtro_sql))
+print(cie); write_csv(cie, "data/revision/01_cie10_rangos.csv")
+
+# 1.2 Año de ocurrencia vs año base (edición) vs año de registro
+anios <- dbGetQuery(con, sprintf("
+  SELECT anio_base, %s AS grupo_causa,
+    CASE WHEN anio_ocur = 1900 THEN 'placeholder_1900'
+         WHEN anio_ocur = anio_base THEN 'ocurrio_mismo_anio'
+         WHEN anio_ocur < anio_base THEN 'ocurrio_antes'
+         ELSE 'ocurrio_despues' END AS ocurrencia,
+    CASE WHEN anio_regis = anio_base THEN 'regis=base' ELSE 'regis<>base' END AS registro,
+    COUNT(*) AS n
+  FROM read_csv_auto('%s') WHERE %s GROUP BY 1,2,3,4 ORDER BY 1,2,3,4",
+  grupo_sql, ruta_csv, filtro_sql))
+write_csv(anios, "data/revision/02_anio_ocurrencia_registro.csv")
+
+resumen_anios <- anios %>% group_by(ocurrencia, registro) %>%
+  summarise(n = sum(n), .groups = "drop") %>% mutate(pct = round(100 * n / sum(n), 2))
+print(resumen_anios)
+write_csv(resumen_anios, "data/revision/02b_resumen_ocurrencia.csv")
+
+# 1.3 Serie alternativa por AÑO DE OCURRENCIA (sin placeholders, >=1998)
+ocur <- dbGetQuery(con, sprintf("
+  SELECT anio_ocur AS anio, %s AS grupo_causa, COUNT(*) AS defunciones
+  FROM read_csv_auto('%s')
+  WHERE %s AND anio_ocur >= 1998 AND anio_ocur <> 1900
+  GROUP BY 1,2 ORDER BY 1,2", grupo_sql, ruta_csv, filtro_sql))
+write_csv(ocur, "data/revision/03_defunciones_por_anio_ocurrencia.csv")
+
+# 1.4 Completitud de 2024: registros totales (todas las causas) por año base y por año de registro
+compl <- dbGetQuery(con, sprintf("
+  SELECT anio_base AS anio, COUNT(*) AS n_base FROM read_csv_auto('%s')
+  WHERE anio_base >= 2015 GROUP BY 1 ORDER BY 1", ruta_csv))
+compl_reg <- dbGetQuery(con, sprintf("
+  SELECT anio_regis AS anio, COUNT(*) AS n_regis FROM read_csv_auto('%s')
+  WHERE anio_regis >= 2015 GROUP BY 1 ORDER BY 1", ruta_csv))
+compl <- full_join(compl, compl_reg, by = "anio")
+print(compl); write_csv(compl, "data/revision/04_completitud_2024.csv")
+dbDisconnect(con, shutdown = TRUE)
+```
+
+
+```{r}
+# Sensibilidad: tasa cruda por año de ocurrencia vs por año base (se calcula tras la sección 2)
+#. 2. Tasas crudas, específicas por esdad y estandarizadas (Revisores 1, 2, 3)
+
+agg <- read_csv("data/agregado_logistica_base.csv", show_col_types = FALSE) %>%
+  mutate(cod = as.integer(edad_agru),
+         banda = case_when(cod <= 5 ~ 0L,                    # 0-4 años
+                           cod >= 6  & cod <= 21 ~ cod - 5L, # 5-9 ... 80-84
+                           cod >= 22 & cod <= 29 ~ 17L,      # 85+
+                           TRUE ~ NA_integer_))              # 30 = no especificada
+
+# edad no especificada
+cat("\nDefunciones con edad no especificada (%):",
+    round(100 * sum(agg$defunciones[is.na(agg$banda)]) / sum(agg$defunciones), 2), "\n")
+
+muertes <- agg %>% filter(!is.na(banda)) %>%
+  group_by(anio, banda, grupo_causa) %>% summarise(d = sum(defunciones), .groups = "drop") %>%
+  complete(anio, banda, grupo_causa, fill = list(d = 0))
+
+pob <- read_excel(ruta_pob)
+pob_b <- pob %>%
+  filter(ENTIDAD == "República Mexicana") %>%
+  mutate(edad_num = readr::parse_number(as.character(EDAD))) %>%
+  filter(!is.na(edad_num)) %>%
+  mutate(banda = pmin(floor(edad_num / 5), 17)) %>%
+  group_by(anio = `AÑO`, banda) %>% summarise(pob = sum(POBLACION), .groups = "drop")
+
+# Chequeo: la población total debe coincidir con la usada en las tasas originales
+chk <- pob_b %>% group_by(anio) %>% summarise(pob_total = sum(pob)) %>%
+  filter(anio %in% c(1998, 2010, 2020, 2024))
+print(chk)
+
+# Población estándar mundial OMS (Ahmad et al., 2001), 18 grupos quinquenales (0-4 ... 85+)
+w_std <- c(8.86, 8.69, 8.60, 8.47, 8.22, 7.93, 7.61, 7.15, 6.59, 6.04,
+           5.37, 4.55, 3.72, 2.96, 2.21, 1.52, 0.91, 0.635)
+w_std <- w_std / sum(w_std)
+
+tasas_b <- muertes %>%
+  left_join(pob_b, by = c("anio", "banda")) %>%
+  filter(anio >= 1998, anio <= 2024) %>%
+  mutate(m = d / pob * 1e5, w = w_std[banda + 1])
+
+serie <- tasas_b %>% group_by(anio, grupo_causa) %>%
+  summarise(crudo = sum(d) / sum(pob) * 1e5,
+            estandarizada = sum(w * m), .groups = "drop")
+write_csv(serie, "data/revision/05_tasas_crudas_y_estandarizadas.csv")
+
+# Comparación con la tasa cruda original (difiere un poco porque aquí se excluye edad no especificada y sexo no especificado)
+orig <- read_csv("data/tasas_inegi_cancer_cardiovascular.csv", show_col_types = FALSE) %>%
+  select(anio, grupo_causa, tasa_100mil)
+cmp <- serie %>% left_join(orig, by = c("anio", "grupo_causa")) %>%
+  mutate(dif = crudo - tasa_100mil)
+cat("\nDiferencia máx. |crudo nuevo - crudo original|:", round(max(abs(cmp$dif), na.rm = TRUE), 3), "\n")
+
+# Sensibilidad: serie por año de ocurrencia
+ocur_t <- read_csv("data/revision/03_defunciones_por_anio_ocurrencia.csv", show_col_types = FALSE) %>%
+  left_join(pob_b %>% group_by(anio) %>% summarise(pob = sum(pob)), by = "anio") %>%
+  filter(anio <= 2024) %>% mutate(tasa_ocurrencia = defunciones / pob * 1e5) %>%
+  select(anio, grupo_causa, tasa_ocurrencia) %>%
+  left_join(orig, by = c("anio", "grupo_causa"))
+write_csv(ocur_t, "data/revision/05b_tasa_ocurrencia_vs_base.csv")
+
+p <- ggplot(serie %>% pivot_longer(c(crudo, estandarizada)),
+            aes(anio, value, color = grupo_causa, linetype = name)) +
+  geom_line(linewidth = 1) +
+  labs(x = "Año", y = "Muertes por 100,000", color = "Causa", linetype = "Tasa",
+       caption = "Estandarización directa, población estándar mundial OMS") +
+  theme_minimal(base_size = 12)
+ggsave("data/revision/fig_crudas_vs_estandarizadas.png", p, width = 8, height = 5, dpi = 200)
+```
+
+
+```{r}
+# 3. Tasas por edad y descomposición (estructura por edad vs. tasas específicas) 
+#    Revisores 1 y 2: separar envejecimiento de cambio en riesgo
+
+grupo_ancho <- function(b) cut(b, breaks = c(-1, 3, 7, 11, 15, 17),
+                               labels = c("0-19", "20-39", "40-59", "60-79", "80+"))
+
+tasas_ancho <- tasas_b %>% mutate(grupo = grupo_ancho(banda)) %>%
+  group_by(anio, grupo_causa, grupo) %>%
+  summarise(d = sum(d), pob = sum(pob), .groups = "drop") %>%
+  mutate(tasa_especifica = d / pob * 1e5)
+write_csv(tasas_ancho, "data/revision/06_tasas_especificas_por_edad.csv")
+
+descomp <- function(causa, y0, y1) {
+  a <- tasas_b %>% filter(grupo_causa == causa)
+  s0 <- a %>% filter(anio == y0) %>% arrange(banda)
+  s1 <- a %>% filter(anio == y1) %>% arrange(banda)
+  c0 <- s0$pob / sum(s0$pob); c1 <- s1$pob / sum(s1$pob)
+  r0 <- s0$m;                 r1 <- s1$m
+  tibble(causa = causa, de = y0, a = y1,
+         tasa_cruda_inicio = sum(c0 * r0), tasa_cruda_fin = sum(c1 * r1),
+         cambio_total = sum(c1 * r1) - sum(c0 * r0),
+         efecto_estructura_edad = sum((c1 - c0) * (r0 + r1) / 2),   # envejecimiento
+         efecto_tasas_especificas = sum((r1 - r0) * (c1 + c0) / 2)) # cambio en tasas por edad
+}
+pares <- list(c(1998, 2019), c(2019, 2024), c(1998, 2024), c(2019, 2021))
+desc <- bind_rows(lapply(c("cancer", "cardiovascular"), function(cz)
+  bind_rows(lapply(pares, function(p) descomp(cz, p[1], p[2])))))
+print(desc, width = Inf)
+write_csv(desc, "data/revision/07_descomposicion_kitagawa.csv")
+```
+
+
+```{r}
+# 4. Dependencia temporal, especificaciones alternativas, sensibilidad de la pandemia y evaluación fuera de muestra
+#    (Revisores 1 y 3; también Revisor 2 'límites de inferencia')
+
+largo <- serie %>% pivot_longer(c(crudo, estandarizada), names_to = "medida", values_to = "tasa")
+
+hac_row <- function(m, term, lag = 3) {
+  ct <- coeftest(m, vcov. = NeweyWest(m, lag = lag, prewhite = FALSE))
+  tibble(est = ct[term, 1], se_hac = ct[term, 2], p_hac = ct[term, 4])
+}
+
+diag_list <- list(); alt_list <- list(); vent_list <- list(); its_list <- list()
+cf_list <- list(); oos_list <- list()
+
+png("data/revision/fig_acf_residuales.png", width = 1100, height = 800, res = 120)
+par(mfrow = c(2, 2))
+for (cz in c("cancer", "cardiovascular")) for (med in c("crudo", "estandarizada")) {
+  d <- largo %>% filter(grupo_causa == cz, medida == med) %>% arrange(anio) %>%
+    mutate(pand = as.integer(anio %in% 2020:2022), tc = anio - 2011)
+  etiqueta <- paste(cz, med)
+
+  # 4.1 Modelo original y diagnósticos de dependencia serial
+  m0 <- lm(tasa ~ anio + pand, data = d)
+  dw <- dwtest(m0); bg <- bgtest(m0, order = 2); lb <- Box.test(resid(m0), lag = 5, type = "Ljung-Box")
+  acf(resid(m0), main = etiqueta, lag.max = 8)
+  diag_list[[etiqueta]] <- tibble(causa = cz, medida = med, r2 = summary(m0)$r.squared,
+    durbin_watson = unname(dw$statistic), p_dw = dw$p.value,
+    p_breusch_godfrey_2 = bg$p.value, p_ljung_box_5 = lb$p.value,
+    aic_lineal = AIC(m0))
+
+  # 4.2 Especificaciones alternativas para la tendencia
+  m1 <- lm(tasa ~ tc + I(tc^2) + pand, data = d)                                   # cuadrática
+  g  <- gls(tasa ~ anio + pand, data = d, correlation = corAR1(form = ~ anio), method = "ML")
+  tt <- summary(g)$tTable
+  alt_list[[etiqueta]] <- bind_rows(
+    tibble(modelo = "OLS (original)",       coef_pandemia = coef(m0)["pand"], se = summary(m0)$coefficients["pand", 2],
+           p = summary(m0)$coefficients["pand", 4], aic = AIC(m0)),
+    bind_cols(tibble(modelo = "OLS + errores HAC (Newey-West, lag 3)"), hac_row(m0, "pand")) %>%
+      rename(coef_pandemia = est, se = se_hac, p = p_hac) %>% mutate(aic = NA_real_),
+    tibble(modelo = "GLS con errores AR(1)", coef_pandemia = tt["pand", 1], se = tt["pand", 2],
+           p = tt["pand", 4], aic = AIC(g)),
+    tibble(modelo = "Tendencia cuadrática",  coef_pandemia = coef(m1)["pand"], se = summary(m1)$coefficients["pand", 2],
+           p = summary(m1)$coefficients["pand", 4], aic = AIC(m1))
+  ) %>% mutate(causa = cz, medida = med, .before = 1)
+
+  # 4.3 Sensibilidad a la definición del periodo pandémico
+  for (nm in c("2020-2021", "2020-2022", "2020-2024")) {
+    yrs <- switch(nm, "2020-2021" = 2020:2021, "2020-2022" = 2020:2022, "2020-2024" = 2020:2024)
+    dd <- d %>% mutate(pw = as.integer(anio %in% yrs))
+    mm <- lm(tasa ~ anio + pw, data = dd)
+    vent_list[[paste(etiqueta, nm)]] <- bind_cols(
+      tibble(causa = cz, medida = med, ventana = nm), hac_row(mm, "pw"))
+  }
+
+  # 4.4 Serie interrumpida: cambio de nivel y de pendiente en 2020
+  dd <- d %>% mutate(post = as.integer(anio >= 2020), t2020 = (anio - 2020) * post)
+  mi <- lm(tasa ~ anio + post + t2020, data = dd)
+  its_list[[etiqueta]] <- tidy(mi) %>% mutate(causa = cz, medida = med, .before = 1) %>%
+    mutate(p_hac = coeftest(mi, vcov. = NeweyWest(mi, lag = 3, prewhite = FALSE))[, 4])
+
+  # 4.5 Contrafactual: tendencia 1998-2019 extrapolada a 2020-2024 (IC de predicción 95 %)
+  pre <- lm(tasa ~ anio, data = d %>% filter(anio < 2020))
+  nd  <- d %>% filter(anio >= 2020)
+  pr  <- predict(pre, newdata = nd, interval = "prediction")
+  cf_list[[etiqueta]] <- tibble(causa = cz, medida = med, anio = nd$anio, observada = nd$tasa,
+    esperada = pr[, "fit"], pi_inf = pr[, "lwr"], pi_sup = pr[, "upr"],
+    exceso = nd$tasa - pr[, "fit"])
+
+  # 4.6 Evaluación fuera de muestra (origen móvil, solo años pre-2020)
+  filas <- list()
+  dpre <- d %>% filter(anio <= 2019)
+  for (T in 2005:2018) for (h in c(1, 3, 5, 10)) {
+    if (T + h > 2019) next
+    tr <- dpre %>% filter(anio <= T); te <- dpre %>% filter(anio == T + h)
+    lin <- lm(tasa ~ anio, tr); qd <- lm(tasa ~ anio + I(anio^2), tr)
+    deriva <- tail(tr$tasa, 1) + h * (tail(tr$tasa, 1) - tr$tasa[1]) / (nrow(tr) - 1)
+    filas[[length(filas) + 1]] <- tibble(origen = T, h = h, obs = te$tasa,
+      lineal = unname(predict(lin, te)), cuadratico = unname(predict(qd, te)), deriva = deriva)
+  }
+  oos_list[[etiqueta]] <- bind_rows(filas) %>%
+    pivot_longer(c(lineal, cuadratico, deriva), names_to = "modelo", values_to = "pred") %>%
+    group_by(h, modelo) %>%
+    summarise(n_pronosticos = n(), RMSE = sqrt(mean((obs - pred)^2)),
+              MAPE_pct = mean(abs(obs - pred) / obs) * 100, .groups = "drop") %>%
+    mutate(causa = cz, medida = med, .before = 1)
+}
+dev.off(); par(mfrow = c(1, 1))
+
+write_csv(bind_rows(diag_list), "data/revision/08_diagnosticos_dependencia_serial.csv")
+write_csv(bind_rows(alt_list),  "data/revision/09_especificaciones_alternativas.csv")
+write_csv(bind_rows(vent_list), "data/revision/10_sensibilidad_ventana_pandemia.csv")
+write_csv(bind_rows(its_list),  "data/revision/11_serie_interrumpida.csv")
+write_csv(bind_rows(cf_list),   "data/revision/12_contrafactual_2020_2024.csv")
+write_csv(bind_rows(oos_list),  "data/revision/13_evaluacion_fuera_de_muestra.csv")
+print(bind_rows(diag_list)); print(bind_rows(vent_list)); print(bind_rows(oos_list), n = 50)
+
+# Modelos por periodo (tabla 5 original) con errores HAC y también para tasa estandarizada
+per_list <- list()
+for (cz in c("cancer", "cardiovascular")) for (med in c("crudo", "estandarizada")) {
+  d <- largo %>% filter(grupo_causa == cz, medida == med)
+  for (pp in c("1998-2019", "2020-2024")) {
+    dd <- if (pp == "1998-2019") d %>% filter(anio < 2020) else d %>% filter(anio >= 2020)
+    mm <- lm(tasa ~ anio, data = dd)
+    per_list[[length(per_list) + 1]] <- tibble(causa = cz, medida = med, periodo = pp, n = nrow(dd),
+      pendiente = coef(mm)[2], se = summary(mm)$coefficients[2, 2], p = summary(mm)$coefficients[2, 4],
+      ic95_inf = confint(mm)[2, 1], ic95_sup = confint(mm)[2, 2], r2 = summary(mm)$r.squared)
+  }
+}
+write_csv(bind_rows(per_list), "data/revision/14_pendientes_por_periodo.csv")
+```
+
+
+```{r}
+# 5. Regresión logística cuasibinomial: conteos, ponderación y sensibilidad
+#    (Revisor 1, corrección 4; Revisor 2, corrección 2)
+
+# OJO: etiquetas de edad CORREGIDAS. En tu diccionario original edad_agru 08 (15-19 años)
+# se asignó a "0-17" y 09 (20-24) a "18-39": los grupos reales son 0-19, 20-39, 40-59, 60-79, 80+.
+datos_wide <- agg %>%
+  filter(!is.na(banda)) %>%
+  mutate(grupo_edad = case_when(cod <= 8 ~ "0-19", cod <= 12 ~ "20-39", cod <= 16 ~ "40-59",
+                                cod <= 20 ~ "60-79", TRUE ~ "80+")) %>%
+  group_by(anio, sexo, grupo_edad, grupo_causa) %>%
+  summarise(defunciones = sum(defunciones), .groups = "drop") %>%
+  pivot_wider(names_from = grupo_causa, values_from = defunciones, values_fill = 0) %>%
+  mutate(periodo = factor(if_else(anio < 2020, "pre_pandemia", "pandemia_post"),
+                          levels = c("pre_pandemia", "pandemia_post")),
+         pand22 = as.integer(anio %in% 2020:2022),
+         anio_c = anio - 2011,
+         sexo = factor(sexo, levels = c(1, 2), labels = c("hombre", "mujer")),
+         grupo_edad = factor(grupo_edad, levels = c("0-19", "20-39", "40-59", "60-79", "80+")))
+
+# 5.1 Conteos de la variable respuesta
+cat("\nCeldas año x sexo x edad:", nrow(datos_wide), "\n")
+resumen_celdas <- tibble(
+  n_celdas = nrow(datos_wide),
+  total_cardiovascular = sum(datos_wide$cardiovascular), total_cancer = sum(datos_wide$cancer),
+  min_cardio_celda = min(datos_wide$cardiovascular), min_cancer_celda = min(datos_wide$cancer),
+  mediana_total_celda = median(datos_wide$cardiovascular + datos_wide$cancer),
+  max_total_celda = max(datos_wide$cardiovascular + datos_wide$cancer))
+print(resumen_celdas, width = Inf)
+write_csv(resumen_celdas, "data/revision/15_logistica_resumen_celdas.csv")
+
+prop_obs <- datos_wide %>% group_by(periodo, grupo_edad) %>%
+  summarise(cardio = sum(cardiovascular), cancer = sum(cancer),
+            prop_cardio_entre_dos_causas = cardio / (cardio + cancer), .groups = "drop")
+write_csv(prop_obs, "data/revision/16_proporcion_cardio_observada.csv")
+
+# 5.2 Modelo del manuscrito (cbind(éxitos, fracasos): cada celda pesa por su total de defunciones)
+f_base <- cbind(cardiovascular, cancer) ~ periodo + sexo + grupo_edad
+mq <- glm(f_base, data = datos_wide, family = quasibinomial)
+cat("\nParámetro de dispersión (quasibinomial):", summary(mq)$dispersion, "\n")
+write_csv(tidy(mq, exponentiate = TRUE, conf.int = TRUE), "data/revision/17_logistica_OR_modelo_base.csv")
+
+# 5.3 Sensibilidad: separar tendencia de largo plazo y choque pandémico
+m_tend  <- glm(update(f_base, . ~ . + anio_c), data = datos_wide, family = quasibinomial)
+m_p22   <- glm(cbind(cardiovascular, cancer) ~ pand22 + anio_c + sexo + grupo_edad,
+               data = datos_wide, family = quasibinomial)
+m_sinp  <- glm(cbind(cardiovascular, cancer) ~ anio_c + sexo + grupo_edad,
+               data = datos_wide, family = quasibinomial)
+sens <- bind_rows(
+  tidy(mq,     exponentiate = TRUE, conf.int = TRUE) %>% mutate(modelo = "base: periodo (2020-2024)"),
+  tidy(m_tend, exponentiate = TRUE, conf.int = TRUE) %>% mutate(modelo = "periodo + tendencia anual"),
+  tidy(m_p22,  exponentiate = TRUE, conf.int = TRUE) %>% mutate(modelo = "pandemia 2020-2022 + tendencia"),
+  tidy(m_sinp, exponentiate = TRUE, conf.int = TRUE) %>% mutate(modelo = "solo tendencia anual")) %>%
+  select(modelo, term, OR = estimate, conf.low, conf.high, p.value)
+write_csv(sens, "data/revision/18_logistica_sensibilidad.csv")
+print(sens %>% filter(!grepl("grupo_edad|Intercept", term)), n = 30)
+
+# 5.4 Dependencia temporal de los residuos del modelo logístico (promedio por año)
+res_anio <- datos_wide %>% mutate(r = residuals(mq, "pearson")) %>%
+  group_by(anio) %>% summarise(r = mean(r), .groups = "drop")
+cat("\nLjung-Box (lag 5) sobre residuos de Pearson medios por año:\n")
+print(Box.test(res_anio$r, lag = 5, type = "Ljung-Box"))
+write_csv(res_anio, "data/revision/19_logistica_residuos_por_anio.csv")
+```
+
+
+```{r}
+# 5. Comparación con la OMS en Edades compatibles (30-69 años)
+#    (Revisores 1, 2 y 3). Sigue sin ser equivalente: la OMS incluye diabetes y
+#    enfermedad respiratoria crónica y usa tablas de vida; aquí solo 2 causas.
+
+oms <- read_csv("data/oms_mexico_ncdmort3070.csv", show_col_types = FALSE) %>%
+  select(anio, oms = probabilidad_30_70)
+
+comp30 <- tasas_b %>% filter(banda >= 6, banda <= 13) %>%          # 30-34 ... 65-69
+  group_by(anio, banda) %>% summarise(m = sum(m), .groups = "drop") %>%   # cáncer + cardiovascular
+  group_by(anio) %>%
+  summarise(prob_30_70_2causas = (1 - exp(-5 * sum(m) / 1e5)) * 100, .groups = "drop")
+
+todas_edades <- serie %>% group_by(anio) %>% summarise(crudo_todas_edades = sum(crudo), .groups = "drop")
+
+cmp_oms <- oms %>% inner_join(comp30, by = "anio") %>% inner_join(todas_edades, by = "anio") %>%
+  filter(anio >= 2000, anio <= 2021) %>%
+  mutate(idx_oms = oms / oms[anio == 2000] * 100,
+         idx_30_69_dos_causas = prob_30_70_2causas / prob_30_70_2causas[anio == 2000] * 100,
+         idx_crudo_todas_edades = crudo_todas_edades / crudo_todas_edades[anio == 2000] * 100)
+print(cmp_oms, n = 25)
+write_csv(cmp_oms, "data/revision/20_oms_comparacion_edades_compatibles.csv")
+
+p2 <- cmp_oms %>% select(anio, starts_with("idx_")) %>% pivot_longer(-anio) %>%
+  ggplot(aes(anio, value, color = name)) + geom_line(linewidth = 1) +
+  geom_hline(yintercept = 100, linetype = "dotted") +
+  labs(x = "Año", y = "Índice (2000 = 100)", color = NULL,
+       caption = "Series no equivalentes: se muestran como contexto descriptivo") +
+  theme_minimal(base_size = 11) + theme(legend.position = "bottom")
+ggsave("data/revision/fig_oms_edades_compatibles.png", p2, width = 8.5, height = 5, dpi = 200)
+
+writeLines(capture.output(sessionInfo()), "data/revision/sessionInfo.txt")
+cat("\nListo. Adjunta en el chat los .csv (y las .png) de data/revision/\n")
+```
+
+```{r}
+# proyeccion_2030_escenarios.R
+# Complemento: proyección a 2030 con estructura por edad (CONAPO) como escenario.
+
+suppressPackageStartupMessages({library(dplyr); library(readr)})
+stopifnot(exists("tasas_b"), exists("pob_b"), exists("w_std"))
+
+pop30 <- pob_b %>% filter(anio == 2030) %>% select(banda, pob30 = pob)
+cat("Población total CONAPO 2030:", format(sum(pop30$pob30), big.mark = ","), "\n")
+
+# Escenario A: tasas específicas por edad congeladas en 2024, con estructura por edad CONAPO 2030
+escA <- tasas_b %>% filter(anio == 2024) %>%
+  select(grupo_causa, banda, m24 = m) %>% left_join(pop30, by = "banda") %>%
+  group_by(grupo_causa) %>%
+  summarise(escenario = "A: tasas por edad 2024 constantes",
+            tasa_cruda_2030 = sum(m24 * pob30) / sum(pob30),
+            tasa_estandarizada_2030 = sum(m24 * w_std[banda + 1]), .groups = "drop")
+
+# Escenario B: tendencia log-lineal de cada grupo de edad (1998-2019) extrapolada a 2030
+tend <- tasas_b %>% filter(anio <= 2019, m > 0) %>%
+  group_by(grupo_causa, banda) %>%
+  group_modify(~ { f <- lm(log(m) ~ anio, data = .x)
+                   tibble(m2030 = exp(predict(f, data.frame(anio = 2030))),
+                          cambio_anual_pct = (exp(coef(f)[2]) - 1) * 100) })
+escB <- tend %>% left_join(pop30, by = "banda") %>%
+  group_by(grupo_causa) %>%
+  summarise(escenario = "B: tendencia por edad 1998-2019 extrapolada",
+            tasa_cruda_2030 = sum(m2030 * pob30) / sum(pob30),
+            tasa_estandarizada_2030 = sum(m2030 * w_std[banda + 1]), .groups = "drop")
+
+# Escenario C (referencia): tasas específicas por edad 2019 constantes (sin pandemia)
+escC <- tasas_b %>% filter(anio == 2019) %>%
+  select(grupo_causa, banda, m19 = m) %>% left_join(pop30, by = "banda") %>%
+  group_by(grupo_causa) %>%
+  summarise(escenario = "C: tasas por edad 2019 constantes",
+            tasa_cruda_2030 = sum(m19 * pob30) / sum(pob30),
+            tasa_estandarizada_2030 = sum(m19 * w_std[banda + 1]), .groups = "drop")
+
+res <- bind_rows(escA, escB, escC) %>% arrange(grupo_causa, escenario)
+print(res, width = Inf)
+write_csv(res, "data/revision/21_proyeccion_2030_escenarios.csv")
+
+# Tasa cruda observada 2024 para comparar
+print(tasas_b %>% filter(anio == 2024) %>% group_by(grupo_causa) %>%
+        summarise(cruda_2024 = sum(d) / sum(pob) * 1e5), width = Inf)
+
+# Intervalos de PREDICCIÓN (no de confianza) del modelo lineal original año + pandemia
+tasas_orig <- read_csv("data/tasas_inegi_cancer_cardiovascular.csv", show_col_types = FALSE) %>%
+  mutate(pandemia = as.integer(anio %in% 2020:2022))
+pi_list <- lapply(c("cancer", "cardiovascular"), function(cz) {
+  m <- lm(tasa_100mil ~ anio + pandemia, data = filter(tasas_orig, grupo_causa == cz))
+  p <- predict(m, data.frame(anio = 2030, pandemia = 0), interval = "prediction")
+  tibble(grupo_causa = cz, ajuste = p[, "fit"], pi_inf = p[, "lwr"], pi_sup = p[, "upr"])
+})
+pi_df <- bind_rows(pi_list); print(pi_df)
+write_csv(pi_df, "data/revision/22_proyeccion_2030_lineal_PI.csv")
+```
+
