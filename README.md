@@ -23,8 +23,6 @@ R code for the analysis submitted to LKE 2026 (BUAP), revised version for POLIBI
 - `proyeccion_2030_escenarios.R` — 2030 scenarios (A, B, C) using CONAPO's age
   structure plus linear-model prediction intervals. Run in the same R session
   right after `analisis_revision_LKE.R`.
-- `nlp/` (optional, see below) — YouTube comment collection, cleaning and
-  sentiment analysis (Python).
 
 ## Data
 
